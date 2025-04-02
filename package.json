@@ -1,0 +1,42 @@
+{
+  "name": "saga-orchestration-example",
+  "version": "1.0.0",
+  "description": "Ejemplo de microservicios con RabbitMQ y patrón Saga de Orquestación",
+  "private": true,
+  "workspaces": [
+    "order-service",
+    "inventory-service",
+    "payment-service",
+    "orchestrator",
+    "shared"
+  ],
+  "scripts": {
+    "start": "concurrently \"npm run start:orchestrator\" \"npm run start:order\" \"npm run start:inventory\" \"npm run start:payment\"",
+    "dev": "concurrently \"npm run dev:orchestrator\" \"npm run dev:order\" \"npm run dev:inventory\" \"npm run dev:payment\"",
+    "start:orchestrator": "cd orchestrator && npm start",
+    "start:order": "cd order-service && npm start",
+    "start:inventory": "cd inventory-service && npm start",
+    "start:payment": "cd payment-service && npm start",
+    "dev:orchestrator": "cd orchestrator && npm run dev",
+    "dev:order": "cd order-service && npm run dev",
+    "dev:inventory": "cd inventory-service && npm run dev",
+    "dev:payment": "cd payment-service && npm run dev",
+    "install-all": "npm install && npm run install-deps",
+    "install-deps": "concurrently \"cd shared && npm install\" \"cd orchestrator && npm install\" \"cd order-service && npm install\" \"cd inventory-service && npm install\" \"cd payment-service && npm install\""
+  },
+  "keywords": [
+    "microservices",
+    "rabbitmq",
+    "saga",
+    "orchestration",
+    "node.js"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}

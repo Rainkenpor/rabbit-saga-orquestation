@@ -1,0 +1,34 @@
+// Queue names
+const QUEUES = {
+  ORDER_SERVICE: 'order_service_queue',
+  INVENTORY_SERVICE: 'inventory_service_queue',
+  PAYMENT_SERVICE: 'payment_service_queue',
+  ORCHESTRATOR: 'orchestrator_queue'
+};
+
+// Event types for the Saga pattern
+const EVENTS = {
+  // Order events
+  ORDER_CREATED: 'ORDER_CREATED',
+  
+  // Inventory events
+  INVENTORY_CHECK_REQUESTED: 'INVENTORY_CHECK_REQUESTED',
+  INVENTORY_CHECK_SUCCEEDED: 'INVENTORY_CHECK_SUCCEEDED',
+  INVENTORY_CHECK_FAILED: 'INVENTORY_CHECK_FAILED',
+  INVENTORY_RESERVED: 'INVENTORY_RESERVED',
+  INVENTORY_RELEASED: 'INVENTORY_RELEASED',
+  
+  // Payment events
+  PAYMENT_REQUESTED: 'PAYMENT_REQUESTED',
+  PAYMENT_SUCCEEDED: 'PAYMENT_SUCCEEDED',
+  PAYMENT_FAILED: 'PAYMENT_FAILED',
+  
+  // Saga completion events
+  ORDER_COMPLETED: 'ORDER_COMPLETED',
+  ORDER_CANCELLED: 'ORDER_CANCELLED'
+};
+
+module.exports = {
+  QUEUES,
+  EVENTS
+};

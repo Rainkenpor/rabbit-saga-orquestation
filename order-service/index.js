@@ -1,6 +1,7 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const RabbitMQClient = require('../shared/rabbitmq');
+require('dotenv').config();
+const MessageService = require('../shared/MessageService');
 const { QUEUES, EVENTS } = require('../shared/constants');
 
 // Initialize express app
@@ -11,28 +12,31 @@ const PORT = 3002;
 // In-memory orders database (in a real app, this would be a real database)
 const orders = {};
 
-// RabbitMQ setup
-const rabbitMQClient = new RabbitMQClient();
+// Servicio de mensajería
+const messageService = new MessageService('order-service');
 
-async function setupRabbitMQ() {
+async function setupMessageService() {
   try {
-    await rabbitMQClient.connect();
-    await rabbitMQClient.createQueue(QUEUES.ORDER_SERVICE);
-    await rabbitMQClient.createQueue(QUEUES.ORCHESTRATOR);
+    // Inicializar el servicio de mensajería
+    await messageService.initialize();
     
-    // Setup consumer for order service queue
-    await rabbitMQClient.consumeMessages(QUEUES.ORDER_SERVICE, handleMessage);
+    // Crear canales necesarios
+    await messageService.createQueue(QUEUES.ORDER_SERVICE);
+    await messageService.createQueue(QUEUES.ORCHESTRATOR);
     
-    console.log('Order service is ready to process messages');
+    // Suscribirse al canal de órdenes
+    await messageService.subscribe(QUEUES.ORDER_SERVICE, handleMessage);
+    
+    console.log('Servicio de órdenes listo para procesar mensajes');
   } catch (error) {
-    console.error('Failed to setup RabbitMQ:', error);
+    console.error('Error configurando servicio de mensajería:', error);
     process.exit(1);
   }
 }
 
 // Message handler for order service
 async function handleMessage(content, message) {
-  console.log(`Processing message: ${content.type}`);
+  console.log(`Procesando mensaje: ${content.type}`);
   
   switch (content.type) {
     case EVENTS.ORDER_COMPLETED:
@@ -44,11 +48,11 @@ async function handleMessage(content, message) {
       break;
       
     default:
-      console.log(`Unknown event type: ${content.type}`);
+      console.log(`Tipo de evento desconocido: ${content.type}`);
   }
   
-  // Acknowledge the message
-  rabbitMQClient.acknowledgeMessage(message);
+  // Confirmar el procesamiento del mensaje
+  messageService.acknowledge(message);
 }
 
 // Handle order completion
@@ -57,7 +61,7 @@ async function handleOrderCompleted(content) {
   const order = orders[orderId];
   
   if (!order) {
-    console.error(`Order not found: ${orderId}`);
+    console.error(`Orden no encontrada: ${orderId}`);
     return;
   }
   
@@ -66,7 +70,7 @@ async function handleOrderCompleted(content) {
   order.transactionId = transactionId;
   order.updatedAt = new Date();
   
-  console.log(`Order ${orderId} completed with transaction: ${transactionId}`);
+  console.log(`Orden ${orderId} completada con transacción: ${transactionId}`);
 }
 
 // Handle order cancellation
@@ -75,7 +79,7 @@ async function handleOrderCancelled(content) {
   const order = orders[orderId];
   
   if (!order) {
-    console.error(`Order not found: ${orderId}`);
+    console.error(`Orden no encontrada: ${orderId}`);
     return;
   }
   
@@ -87,7 +91,7 @@ async function handleOrderCancelled(content) {
   }
   order.updatedAt = new Date();
   
-  console.log(`Order ${orderId} cancelled. Reason: ${reason}`);
+  console.log(`Orden ${orderId} cancelada. Razón: ${reason}`);
 }
 
 // API endpoints for order management
@@ -96,7 +100,7 @@ app.post('/orders', async (req, res) => {
     const { customerId, items } = req.body;
     
     if (!customerId || !items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'Invalid order data. Required: customerId and items array.' });
+      return res.status(400).json({ error: 'Datos de orden inválidos. Se requiere: customerId y array de items.' });
     }
     
     // Calculate total amount (simplified)
@@ -118,7 +122,7 @@ app.post('/orders', async (req, res) => {
     orders[orderId] = order;
     
     // Publish order created event to start the saga
-    await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+    await messageService.publish(QUEUES.ORCHESTRATOR, {
       type: EVENTS.ORDER_CREATED,
       data: {
         orderId,
@@ -130,8 +134,8 @@ app.post('/orders', async (req, res) => {
     
     res.status(201).json(order);
   } catch (error) {
-    console.error('Error creating order:', error);
-    res.status(500).json({ error: 'Failed to create order' });
+    console.error('Error creando orden:', error);
+    res.status(500).json({ error: 'Error al crear la orden' });
   }
 });
 
@@ -142,21 +146,21 @@ app.get('/orders', (req, res) => {
 app.get('/orders/:id', (req, res) => {
   const order = orders[req.params.id];
   if (!order) {
-    return res.status(404).json({ error: 'Order not found' });
+    return res.status(404).json({ error: 'Orden no encontrada' });
   }
   res.json(order);
 });
 
-// Start server and connect to RabbitMQ
+// Start server and setup messaging
 async function startServer() {
   app.listen(PORT, () => {
-    console.log(`Order service listening on port ${PORT}`);
+    console.log(`Servicio de órdenes escuchando en el puerto ${PORT}`);
   });
   
-  await setupRabbitMQ();
+  await setupMessageService();
 }
 
 startServer().catch(err => {
-  console.error('Failed to start server:', err);
+  console.error('Error al iniciar el servidor:', err);
   process.exit(1);
 });

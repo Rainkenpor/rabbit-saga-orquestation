@@ -21,8 +21,22 @@
     "dev:order": "cd order-service && npm run dev",
     "dev:inventory": "cd inventory-service && npm run dev",
     "dev:payment": "cd payment-service && npm run dev",
-    "install-all": "npm install && npm run install-deps",
-    "install-deps": "concurrently \"cd shared && npm install\" \"cd orchestrator && npm install\" \"cd order-service && npm install\" \"cd inventory-service && npm install\" \"cd payment-service && npm install\""
+    "install:all": "npm install && npm run install:deps",
+    "install:deps": "npm-run-all --parallel install:*:deps",
+    "install:shared:deps": "cd shared && npm install",
+    "install:orchestrator:deps": "cd orchestrator && npm install",
+    "install:order:deps": "cd order-service && npm install",
+    "install:inventory:deps": "cd inventory-service && npm install",
+    "install:payment:deps": "cd payment-service && npm install",
+    "test": "npm-run-all --parallel test:*",
+    "test:orchestrator": "cd orchestrator && npm test",
+    "test:order": "cd order-service && npm test",
+    "test:inventory": "cd inventory-service && npm test",
+    "test:payment": "cd payment-service && npm test",
+    "clean": "npm-run-all --parallel clean:*",
+    "clean:modules": "rimraf node_modules",
+    "clean:dist": "rimraf */dist",
+    "clean:locks": "rimraf package-lock.json */package-lock.json"
   },
   "keywords": [
     "microservices",
@@ -33,10 +47,19 @@
   ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=14.0.0"
+  },
   "dependencies": {
     "concurrently": "^8.2.0"
   },
   "devDependencies": {
-    "nodemon": "^2.0.22"
+    "nodemon": "^2.0.22",
+    "npm-run-all": "^4.1.5",
+    "rimraf": "^5.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/rabbit-saga-orquestation.git"
   }
 }

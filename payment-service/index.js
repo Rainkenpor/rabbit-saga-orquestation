@@ -1,6 +1,7 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const RabbitMQClient = require('../shared/rabbitmq');
+require('dotenv').config();
+const MessageService = require('../shared/MessageService');
 const { QUEUES, EVENTS } = require('../shared/constants');
 
 // Initialize express app
@@ -18,28 +19,31 @@ const customerCreditLimits = {
   'customer-3': 100
 };
 
-// RabbitMQ setup
-const rabbitMQClient = new RabbitMQClient();
+// Servicio de mensajería
+const messageService = new MessageService('payment-service');
 
-async function setupRabbitMQ() {
+async function setupMessageService() {
   try {
-    await rabbitMQClient.connect();
-    await rabbitMQClient.createQueue(QUEUES.PAYMENT_SERVICE);
-    await rabbitMQClient.createQueue(QUEUES.ORCHESTRATOR);
+    // Inicializar el servicio de mensajería
+    await messageService.initialize();
     
-    // Setup consumer for payment service queue
-    await rabbitMQClient.consumeMessages(QUEUES.PAYMENT_SERVICE, handleMessage);
+    // Crear canales necesarios
+    await messageService.createQueue(QUEUES.PAYMENT_SERVICE);
+    await messageService.createQueue(QUEUES.ORCHESTRATOR);
     
-    console.log('Payment service is ready to process messages');
+    // Suscribirse al canal de pagos
+    await messageService.subscribe(QUEUES.PAYMENT_SERVICE, handleMessage);
+    
+    console.log('Servicio de pagos listo para procesar mensajes');
   } catch (error) {
-    console.error('Failed to setup RabbitMQ:', error);
+    console.error('Error configurando servicio de mensajería:', error);
     process.exit(1);
   }
 }
 
 // Message handler for payment service
 async function handleMessage(content, message) {
-  console.log(`Processing message: ${content.type}`);
+  console.log(`Procesando mensaje: ${content.type}`);
   
   switch (content.type) {
     case EVENTS.PAYMENT_REQUESTED:
@@ -47,11 +51,11 @@ async function handleMessage(content, message) {
       break;
       
     default:
-      console.log(`Unknown event type: ${content.type}`);
+      console.log(`Tipo de evento desconocido: ${content.type}`);
   }
   
-  // Acknowledge the message
-  rabbitMQClient.acknowledgeMessage(message);
+  // Confirmar el procesamiento del mensaje
+  messageService.acknowledge(message);
 }
 
 // Handle payment request
@@ -62,13 +66,13 @@ async function handlePaymentRequest(content) {
   const customerCreditLimit = customerCreditLimits[customerId];
   
   if (!customerCreditLimit) {
-    console.log(`Customer not found: ${customerId}`);
+    console.log(`Cliente no encontrado: ${customerId}`);
     
-    await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+    await messageService.publish(QUEUES.ORCHESTRATOR, {
       type: EVENTS.PAYMENT_FAILED,
       data: {
         orderId,
-        reason: 'Customer not found'
+        reason: 'Cliente no encontrado'
       }
     });
     return;
@@ -76,13 +80,13 @@ async function handlePaymentRequest(content) {
   
   // Check if customer has enough credit
   if (amount > customerCreditLimit) {
-    console.log(`Insufficient funds for customer: ${customerId}, needed: ${amount}, limit: ${customerCreditLimit}`);
+    console.log(`Fondos insuficientes para cliente: ${customerId}, requerido: ${amount}, límite: ${customerCreditLimit}`);
     
-    await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+    await messageService.publish(QUEUES.ORCHESTRATOR, {
       type: EVENTS.PAYMENT_FAILED,
       data: {
         orderId,
-        reason: 'Insufficient funds',
+        reason: 'Fondos insuficientes',
         details: {
           required: amount,
           available: customerCreditLimit
@@ -105,10 +109,10 @@ async function handlePaymentRequest(content) {
     timestamp: new Date()
   };
   
-  console.log(`Payment processed for order: ${orderId}, amount: ${amount}, transaction: ${transactionId}`);
+  console.log(`Pago procesado para orden: ${orderId}, monto: ${amount}, transacción: ${transactionId}`);
   
   // Notify orchestrator about success
-  await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+  await messageService.publish(QUEUES.ORCHESTRATOR, {
     type: EVENTS.PAYMENT_SUCCEEDED,
     data: {
       orderId,
@@ -126,21 +130,21 @@ app.get('/payments', (req, res) => {
 app.get('/payments/:id', (req, res) => {
   const payment = payments[req.params.id];
   if (!payment) {
-    return res.status(404).json({ error: 'Payment not found' });
+    return res.status(404).json({ error: 'Pago no encontrado' });
   }
   res.json(payment);
 });
 
-// Start server and connect to RabbitMQ
+// Start server and setup messaging
 async function startServer() {
   app.listen(PORT, () => {
-    console.log(`Payment service listening on port ${PORT}`);
+    console.log(`Servicio de pagos escuchando en el puerto ${PORT}`);
   });
   
-  await setupRabbitMQ();
+  await setupMessageService();
 }
 
 startServer().catch(err => {
-  console.error('Failed to start server:', err);
+  console.error('Error al iniciar el servidor:', err);
   process.exit(1);
 });

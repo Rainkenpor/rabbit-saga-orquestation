@@ -1,5 +1,6 @@
 const express = require('express');
-const RabbitMQClient = require('../shared/rabbitmq');
+require('dotenv').config();
+const MessageService = require('../shared/MessageService');
 const { QUEUES, EVENTS } = require('../shared/constants');
 
 // Initialize express app
@@ -17,28 +18,31 @@ const inventoryItems = {
 // Map to keep track of temporary reservations
 const reservations = {};
 
-// RabbitMQ setup
-const rabbitMQClient = new RabbitMQClient();
+// Servicio de mensajería
+const messageService = new MessageService('inventory-service');
 
-async function setupRabbitMQ() {
+async function setupMessageService() {
   try {
-    await rabbitMQClient.connect();
-    await rabbitMQClient.createQueue(QUEUES.INVENTORY_SERVICE);
-    await rabbitMQClient.createQueue(QUEUES.ORCHESTRATOR);
+    // Inicializar el servicio de mensajería
+    await messageService.initialize();
     
-    // Setup consumer for inventory service queue
-    await rabbitMQClient.consumeMessages(QUEUES.INVENTORY_SERVICE, handleMessage);
+    // Crear canales necesarios
+    await messageService.createQueue(QUEUES.INVENTORY_SERVICE);
+    await messageService.createQueue(QUEUES.ORCHESTRATOR);
     
-    console.log('Inventory service is ready to process messages');
+    // Suscribirse al canal de inventario
+    await messageService.subscribe(QUEUES.INVENTORY_SERVICE, handleMessage);
+    
+    console.log('Servicio de inventario listo para procesar mensajes');
   } catch (error) {
-    console.error('Failed to setup RabbitMQ:', error);
+    console.error('Error configurando servicio de mensajería:', error);
     process.exit(1);
   }
 }
 
 // Message handler for inventory service
 async function handleMessage(content, message) {
-  console.log(`Processing message: ${content.type}`);
+  console.log(`Procesando mensaje: ${content.type}`);
   
   switch (content.type) {
     case EVENTS.INVENTORY_CHECK_REQUESTED:
@@ -54,11 +58,11 @@ async function handleMessage(content, message) {
       break;
       
     default:
-      console.log(`Unknown event type: ${content.type}`);
+      console.log(`Tipo de evento desconocido: ${content.type}`);
   }
   
-  // Acknowledge the message
-  rabbitMQClient.acknowledgeMessage(message);
+  // Confirmar el procesamiento del mensaje
+  messageService.acknowledge(message);
 }
 
 // Handle inventory check request
@@ -91,7 +95,7 @@ async function handleInventoryCheckRequest(content) {
       status: 'pending'
     };
     
-    await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+    await messageService.publish(QUEUES.ORCHESTRATOR, {
       type: EVENTS.INVENTORY_CHECK_SUCCEEDED,
       data: {
         orderId,
@@ -99,7 +103,7 @@ async function handleInventoryCheckRequest(content) {
       }
     });
   } else {
-    await rabbitMQClient.publishMessage(QUEUES.ORCHESTRATOR, {
+    await messageService.publish(QUEUES.ORCHESTRATOR, {
       type: EVENTS.INVENTORY_CHECK_FAILED,
       data: {
         orderId,
@@ -164,13 +168,13 @@ app.get('/reservations', (req, res) => {
   res.json(reservations);
 });
 
-// Start server and connect to RabbitMQ
+// Start server and setup messaging
 async function startServer() {
   app.listen(PORT, () => {
     console.log(`Inventory service listening on port ${PORT}`);
   });
   
-  await setupRabbitMQ();
+  await setupMessageService();
 }
 
 startServer().catch(err => {

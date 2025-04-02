@@ -1,7 +1,10 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const RabbitMQClient = require('../shared/rabbitmq');
-const { QUEUES, EVENTS } = require('../shared/constants');
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config();
+const MessageService = require('../shared/MessageService');
+const { EVENTS } = require('../shared/constants');
 
 // Initialize express app
 const app = express();
@@ -11,58 +14,142 @@ const PORT = 3000;
 // Store for tracking saga state
 const sagaStore = {};
 
-// RabbitMQ setup
-const rabbitMQClient = new RabbitMQClient();
+// Store for registered services
+const serviceRegistry = {};
 
-async function setupRabbitMQ() {
+// Servicio de mensajería
+const messageService = new MessageService('orchestrator');
+
+/**
+ * Registra un servicio en el orquestador
+ * @param {Object} serviceContract - Contrato del servicio según definido en shared/contracts.js
+ */
+function registerService(serviceContract) {
+  if (!serviceContract || !serviceContract.name) {
+    throw new Error('El contrato del servicio debe incluir un nombre');
+  }
+
+  console.log(`Registrando servicio: ${serviceContract.name}`);
+  
+  // Registrar el servicio con su contrato
+  serviceRegistry[serviceContract.name] = {
+    ...serviceContract,
+    active: true,
+    registeredAt: new Date()
+  };
+  
+  return serviceContract.name;
+}
+
+/**
+ * Carga todos los servicios disponibles en la carpeta services
+ */
+async function loadServices() {
   try {
-    await rabbitMQClient.connect();
-    await rabbitMQClient.createQueue(QUEUES.ORCHESTRATOR);
-    await rabbitMQClient.createQueue(QUEUES.ORDER_SERVICE);
-    await rabbitMQClient.createQueue(QUEUES.INVENTORY_SERVICE);
-    await rabbitMQClient.createQueue(QUEUES.PAYMENT_SERVICE);
+    const servicesDir = path.join(__dirname, 'services');
     
-    // Setup consumer for orchestrator queue
-    await rabbitMQClient.consumeMessages(QUEUES.ORCHESTRATOR, handleMessage);
+    // Asegurarse de que la carpeta services existe
+    if (!fs.existsSync(servicesDir)) {
+      console.log('Carpeta services no encontrada. Creándola...');
+      fs.mkdirSync(servicesDir);
+    }
     
-    console.log('Orchestrator is ready to process messages');
+    const serviceFiles = fs.readdirSync(servicesDir);
+    
+    for (const serviceFile of serviceFiles) {
+      if (serviceFile.endsWith('.js')) {
+        try {
+          const servicePath = path.join(servicesDir, serviceFile);
+          const service = require(servicePath);
+          
+          if (service.contract) {
+            registerService(service.contract);
+            console.log(`Servicio cargado: ${service.contract.name}`);
+          } else {
+            console.warn(`Advertencia: El archivo ${serviceFile} no exporta un contrato de servicio válido.`);
+          }
+        } catch (error) {
+          console.error(`Error cargando servicio ${serviceFile}:`, error);
+        }
+      }
+    }
+    
+    console.log(`Servicios registrados: ${Object.keys(serviceRegistry).length}`);
   } catch (error) {
-    console.error('Failed to setup RabbitMQ:', error);
+    console.error('Error cargando servicios:', error);
+  }
+}
+
+/**
+ * Registra manualmente los microservicios del sistema
+ * En una implementación real, los servicios se registrarían dinámicamente
+ */
+function registerCoreServices() {
+  const { inventoryServiceContract, paymentServiceContract, orderServiceContract } = require('../shared/contracts');
+  
+  registerService(inventoryServiceContract);
+  registerService(paymentServiceContract);
+  registerService(orderServiceContract);
+}
+
+async function setupMessageService() {
+  try {
+    // Inicializar el servicio de mensajería
+    await messageService.initialize();
+    
+    // Crear canal del orquestador
+    await messageService.createQueue('orchestrator_queue');
+    
+    // Crear canales para todos los servicios registrados
+    for (const serviceName in serviceRegistry) {
+      const service = serviceRegistry[serviceName];
+      await messageService.createQueue(service.queueName);
+    }
+    
+    // Suscribirse al canal del orquestador
+    await messageService.subscribe('orchestrator_queue', handleMessage);
+    
+    console.log('Orquestador listo para procesar mensajes');
+  } catch (error) {
+    console.error('Error configurando servicio de mensajería:', error);
     process.exit(1);
   }
 }
 
 // Message handler for orchestrator
 async function handleMessage(content, message) {
-  console.log(`Orchestrator processing message: ${content.type}`);
+  console.log(`Orquestador procesando mensaje: ${content.type}`);
   
-  switch (content.type) {
-    case EVENTS.ORDER_CREATED:
-      await handleOrderCreated(content);
-      break;
-      
-    case EVENTS.INVENTORY_CHECK_SUCCEEDED:
-      await handleInventoryCheckSuccess(content);
-      break;
-      
-    case EVENTS.INVENTORY_CHECK_FAILED:
-      await handleInventoryCheckFailure(content);
-      break;
-      
-    case EVENTS.PAYMENT_SUCCEEDED:
-      await handlePaymentSuccess(content);
-      break;
-      
-    case EVENTS.PAYMENT_FAILED:
-      await handlePaymentFailure(content);
-      break;
-      
-    default:
-      console.log(`Unknown event type: ${content.type}`);
+  // Buscar el manejador específico para este tipo de evento
+  const handler = findEventHandler(content.type);
+  
+  if (handler) {
+    try {
+      await handler(content);
+    } catch (error) {
+      console.error(`Error procesando evento ${content.type}:`, error);
+    }
+  } else {
+    console.log(`No hay manejador para el evento: ${content.type}`);
   }
   
-  // Acknowledge the message
-  rabbitMQClient.acknowledgeMessage(message);
+  // Confirmar el procesamiento del mensaje
+  messageService.acknowledge(message);
+}
+
+/**
+ * Encuentra el manejador adecuado para un tipo de evento
+ */
+function findEventHandler(eventType) {
+  const handlers = {
+    [EVENTS.ORDER_CREATED]: handleOrderCreated,
+    [EVENTS.INVENTORY_CHECK_SUCCEEDED]: handleInventoryCheckSuccess,
+    [EVENTS.INVENTORY_CHECK_FAILED]: handleInventoryCheckFailure,
+    [EVENTS.PAYMENT_SUCCEEDED]: handlePaymentSuccess,
+    [EVENTS.PAYMENT_FAILED]: handlePaymentFailure
+  };
+  
+  return handlers[eventType];
 }
 
 // Handle ORDER_CREATED event
@@ -82,10 +169,16 @@ async function handleOrderCreated(content) {
     ]
   };
   
-  console.log(`Starting saga for order: ${orderId}`);
+  console.log(`Iniciando saga para la orden: ${orderId}`);
   
-  // Request inventory check
-  await rabbitMQClient.publishMessage(QUEUES.INVENTORY_SERVICE, {
+  // Request inventory check usando el servicio registrado
+  const inventoryService = serviceRegistry['inventory-service'];
+  if (!inventoryService) {
+    console.error('Servicio de inventario no registrado');
+    return;
+  }
+  
+  await messageService.publish(inventoryService.queueName, {
     type: EVENTS.INVENTORY_CHECK_REQUESTED,
     data: {
       orderId,
@@ -100,7 +193,7 @@ async function handleInventoryCheckSuccess(content) {
   const saga = sagaStore[orderId];
   
   if (!saga) {
-    console.error(`Saga not found for order: ${orderId}`);
+    console.error(`Saga no encontrada para la orden: ${orderId}`);
     return;
   }
   
@@ -109,10 +202,16 @@ async function handleInventoryCheckSuccess(content) {
   saga.reservationId = reservationId;
   saga.steps.push({ type: EVENTS.INVENTORY_CHECK_SUCCEEDED, timestamp: new Date(), data: content.data });
   
-  console.log(`Inventory check succeeded for order: ${orderId}. Proceeding to payment.`);
+  console.log(`Verificación de inventario exitosa para la orden: ${orderId}. Procediendo al pago.`);
   
-  // Request payment
-  await rabbitMQClient.publishMessage(QUEUES.PAYMENT_SERVICE, {
+  // Request payment usando el servicio registrado
+  const paymentService = serviceRegistry['payment-service'];
+  if (!paymentService) {
+    console.error('Servicio de pagos no registrado');
+    return;
+  }
+  
+  await messageService.publish(paymentService.queueName, {
     type: EVENTS.PAYMENT_REQUESTED,
     data: {
       orderId,
@@ -128,7 +227,7 @@ async function handleInventoryCheckFailure(content) {
   const saga = sagaStore[orderId];
   
   if (!saga) {
-    console.error(`Saga not found for order: ${orderId}`);
+    console.error(`Saga no encontrada para la orden: ${orderId}`);
     return;
   }
   
@@ -138,10 +237,16 @@ async function handleInventoryCheckFailure(content) {
   saga.insufficientItems = insufficientItems;
   saga.steps.push({ type: EVENTS.INVENTORY_CHECK_FAILED, timestamp: new Date(), data: content.data });
   
-  console.log(`Inventory check failed for order: ${orderId}. Reason: ${reason}`);
+  console.log(`Verificación de inventario fallida para la orden: ${orderId}. Razón: ${reason}`);
   
   // Notify order service about failure
-  await rabbitMQClient.publishMessage(QUEUES.ORDER_SERVICE, {
+  const orderService = serviceRegistry['order-service'];
+  if (!orderService) {
+    console.error('Servicio de órdenes no registrado');
+    return;
+  }
+  
+  await messageService.publish(orderService.queueName, {
     type: EVENTS.ORDER_CANCELLED,
     data: {
       orderId,
@@ -157,7 +262,7 @@ async function handlePaymentSuccess(content) {
   const saga = sagaStore[orderId];
   
   if (!saga) {
-    console.error(`Saga not found for order: ${orderId}`);
+    console.error(`Saga no encontrada para la orden: ${orderId}`);
     return;
   }
   
@@ -166,10 +271,16 @@ async function handlePaymentSuccess(content) {
   saga.transactionId = transactionId;
   saga.steps.push({ type: EVENTS.PAYMENT_SUCCEEDED, timestamp: new Date(), data: content.data });
   
-  console.log(`Payment succeeded for order: ${orderId}. Transaction: ${transactionId}`);
+  console.log(`Pago exitoso para la orden: ${orderId}. Transacción: ${transactionId}`);
   
   // Confirm inventory reservation
-  await rabbitMQClient.publishMessage(QUEUES.INVENTORY_SERVICE, {
+  const inventoryService = serviceRegistry['inventory-service'];
+  if (!inventoryService) {
+    console.error('Servicio de inventario no registrado');
+    return;
+  }
+  
+  await messageService.publish(inventoryService.queueName, {
     type: EVENTS.INVENTORY_RESERVED,
     data: {
       orderId,
@@ -178,7 +289,13 @@ async function handlePaymentSuccess(content) {
   });
   
   // Notify order service about success
-  await rabbitMQClient.publishMessage(QUEUES.ORDER_SERVICE, {
+  const orderService = serviceRegistry['order-service'];
+  if (!orderService) {
+    console.error('Servicio de órdenes no registrado');
+    return;
+  }
+  
+  await messageService.publish(orderService.queueName, {
     type: EVENTS.ORDER_COMPLETED,
     data: {
       orderId,
@@ -193,7 +310,7 @@ async function handlePaymentFailure(content) {
   const saga = sagaStore[orderId];
   
   if (!saga) {
-    console.error(`Saga not found for order: ${orderId}`);
+    console.error(`Saga no encontrada para la orden: ${orderId}`);
     return;
   }
   
@@ -202,10 +319,16 @@ async function handlePaymentFailure(content) {
   saga.failureReason = reason;
   saga.steps.push({ type: EVENTS.PAYMENT_FAILED, timestamp: new Date(), data: content.data });
   
-  console.log(`Payment failed for order: ${orderId}. Reason: ${reason}`);
+  console.log(`Pago fallido para la orden: ${orderId}. Razón: ${reason}`);
   
   // Release inventory reservation (compensating action)
-  await rabbitMQClient.publishMessage(QUEUES.INVENTORY_SERVICE, {
+  const inventoryService = serviceRegistry['inventory-service'];
+  if (!inventoryService) {
+    console.error('Servicio de inventario no registrado');
+    return;
+  }
+  
+  await messageService.publish(inventoryService.queueName, {
     type: EVENTS.INVENTORY_RELEASED,
     data: {
       orderId,
@@ -214,7 +337,13 @@ async function handlePaymentFailure(content) {
   });
   
   // Notify order service about failure
-  await rabbitMQClient.publishMessage(QUEUES.ORDER_SERVICE, {
+  const orderService = serviceRegistry['order-service'];
+  if (!orderService) {
+    console.error('Servicio de órdenes no registrado');
+    return;
+  }
+  
+  await messageService.publish(orderService.queueName, {
     type: EVENTS.ORDER_CANCELLED,
     data: {
       orderId,
@@ -231,21 +360,33 @@ app.get('/sagas', (req, res) => {
 app.get('/sagas/:id', (req, res) => {
   const saga = sagaStore[req.params.id];
   if (!saga) {
-    return res.status(404).json({ error: 'Saga not found' });
+    return res.status(404).json({ error: 'Saga no encontrada' });
   }
   res.json(saga);
+});
+
+// Endpoint para ver servicios registrados
+app.get('/services', (req, res) => {
+  res.json(Object.values(serviceRegistry));
 });
 
 // Start server and connect to RabbitMQ
 async function startServer() {
   app.listen(PORT, () => {
-    console.log(`Orchestrator service listening on port ${PORT}`);
+    console.log(`Orquestador escuchando en el puerto ${PORT}`);
   });
   
-  await setupRabbitMQ();
+  // Registrar los servicios core
+  registerCoreServices();
+  
+  // Cargar servicios adicionales desde la carpeta services
+  await loadServices();
+  
+  // Configurar servicio de mensajería
+  await setupMessageService();
 }
 
 startServer().catch(err => {
-  console.error('Failed to start server:', err);
+  console.error('Error iniciando el servidor:', err);
   process.exit(1);
 });
